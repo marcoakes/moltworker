@@ -1,0 +1,65 @@
+name: Sync and Deploy Moltworker
+
+on:
+  workflow_dispatch:  # Manual trigger
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: '0 0 * * 0'  # Weekly sync on Sundays
+
+jobs:
+  sync-and-deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GH_PAT }}
+      
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+      
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/cloudflare/moltworker.git || true
+          git fetch upstream
+      
+      - name: Merge upstream changes
+        run: |
+          git merge upstream/main --allow-unrelated-histories -X theirs || echo "No changes to merge"
+      
+      - name: Push changes
+        run: |
+          git push origin main || echo "Nothing to push"
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Deploy to Cloudflare Workers
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          secrets: |
+            ANTHROPIC_API_KEY
+            MOLTBOT_GATEWAY_TOKEN
+            R2_ACCESS_KEY_ID
+            R2_SECRET_ACCESS_KEY
+            CF_ACCOUNT_ID
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          MOLTBOT_GATEWAY_TOKEN: ${{ secrets.MOLTBOT_GATEWAY_TOKEN }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
