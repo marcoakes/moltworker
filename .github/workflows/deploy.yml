@@ -53,8 +53,15 @@ jobs:
       - name: Build project
         run: npm run build
 
-      - name: Deploy to Cloudflare Workers
-        run: npx wrangler deploy
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Deploy to Cloudflare Workers with Container Support
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: deploy --keep-vars
 
       - name: Set Cloudflare Worker Secrets
         run: |
