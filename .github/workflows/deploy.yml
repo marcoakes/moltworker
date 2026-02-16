@@ -12,6 +12,10 @@ jobs:
   sync-and-deploy:
     runs-on: ubuntu-latest
 
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -50,17 +54,10 @@ jobs:
         run: npm run build
 
       - name: Deploy to Cloudflare Workers
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx wrangler deploy
 
       - name: Set Cloudflare Worker Secrets
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          echo "Setting worker secrets..."
           echo "${{ secrets.ANTHROPIC_API_KEY }}" | npx wrangler secret put ANTHROPIC_API_KEY || true
           echo "${{ secrets.MOLTBOT_GATEWAY_TOKEN }}" | npx wrangler secret put MOLTBOT_GATEWAY_TOKEN || true
           echo "${{ secrets.R2_ACCESS_KEY_ID }}" | npx wrangler secret put R2_ACCESS_KEY_ID || true
