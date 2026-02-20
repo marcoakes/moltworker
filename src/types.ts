@@ -42,6 +42,8 @@ export interface MoltbotEnv {
   BROWSER?: Fetcher;
   CDP_SECRET?: string; // Shared secret for CDP endpoint authentication
   WORKER_URL?: string; // Public URL of the worker (for CDP endpoint)
+  // Skills system configuration
+  SKILLS_ENABLED?: string; // Set to 'true' to enable self-improving skills system
 }
 
 /**

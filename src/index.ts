@@ -31,6 +31,20 @@ import { publicRoutes, api, adminUi, debug, cdp } from './routes';
 import { redactSensitiveParams } from './utils/logging';
 import loadingPageHtml from './assets/loading.html';
 import configErrorHtml from './assets/config-error.html';
+import { retrieveSkillsForMessage } from './skills/retrieval';
+import { augmentMessage } from './skills/injection';
+import {
+  storeRetrievedSkills,
+  getRetrievedSkills,
+  updateConversationMessage,
+  updateConversationResponse,
+  triggerReflection,
+  findPendingConversation,
+} from './skills/reflection';
+import { initializeSkills, incrementSkillRetrieval } from './skills/store';
+import { skillsRoutes, skillsDashboardHandler } from './routes/skills';
+import skillsDashboardHtml from './pages/skills-dashboard.html';
+import { captureMessage, isCaptureEnabled } from './skills/diagnostics';
 
 /**
  * Transform error messages from the gateway to be more user-friendly.
@@ -207,8 +221,14 @@ app.use('*', async (c, next) => {
   return middleware(c, next);
 });
 
-// Mount API routes (protected by Cloudflare Access)
+// Mount Skills API routes FIRST (more specific routes must come before general routes)
+app.route('/api/skills', skillsRoutes);
+
+// Mount general API routes (protected by Cloudflare Access)
 app.route('/api', api);
+
+// Skills Dashboard (protected by Cloudflare Access)
+app.get('/_skills', skillsDashboardHandler);
 
 // Mount Admin UI routes (protected by Cloudflare Access)
 app.route('/_admin', adminUi);
@@ -258,6 +278,13 @@ app.all('*', async (c) => {
   // Ensure moltbot is running (this will wait for startup)
   try {
     await ensureMoltbotGateway(sandbox, c.env);
+
+    // Initialize skills if enabled
+    if (c.env.SKILLS_ENABLED === 'true') {
+      await initializeSkills(c.env.MOLTBOT_BUCKET).catch((err) => {
+        console.error('[Skills] Failed to initialize skills:', err);
+      });
+    }
   } catch (error) {
     console.error('[PROXY] Failed to start Moltbot:', error);
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
@@ -327,8 +354,8 @@ app.all('*', async (c) => {
       console.log('[WS] serverWs.readyState:', serverWs.readyState);
     }
 
-    // Relay messages from client to container
-    serverWs.addEventListener('message', (event) => {
+    // Relay messages from client to container with skills injection
+    serverWs.addEventListener('message', async (event) => {
       if (debugLogs) {
         console.log(
           '[WS] Client -> Container:',
@@ -336,14 +363,83 @@ app.all('*', async (c) => {
           typeof event.data === 'string' ? event.data.slice(0, 200) : '(binary)',
         );
       }
+
+      let data = event.data;
+
+      // Capture for diagnostics
+      if (isCaptureEnabled() && typeof data === 'string') {
+        captureMessage('client->container', data);
+      }
+
+      // Skills injection (only if SKILLS_ENABLED is true)
+      console.log('[Skills DEBUG] SKILLS_ENABLED:', c.env.SKILLS_ENABLED, 'data type:', typeof data);
+      if (c.env.SKILLS_ENABLED === 'true' && typeof data === 'string') {
+        try {
+          const parsed = JSON.parse(data);
+          console.log('[Skills DEBUG] Parsed message type:', parsed.type, 'method:', parsed.method);
+
+          // OpenClaw format: {"type":"req","method":"chat.send","params":{"message":"..."}}
+          if (parsed.type === 'req' && parsed.method === 'chat.send' && parsed.params?.message) {
+            const userMessage = parsed.params.message;
+
+            console.log('[Skills] Detected chat.send, message length:', userMessage.length);
+
+            // Retrieve relevant skills
+            const skillResult = await retrieveSkillsForMessage(c.env.MOLTBOT_BUCKET, userMessage);
+
+            console.log('[Skills] Retrieved', skillResult.skillIds.length, 'skills');
+
+            if (skillResult.general.length > 0 || skillResult.relevant.length > 0) {
+              // Augment message with skills
+              const augmented = augmentMessage(userMessage, skillResult.formatted);
+              parsed.params.message = augmented;
+
+              // Store retrieved skill IDs for reflection
+              const conversationId = parsed.params.idempotencyKey || parsed.id || `conv-${Date.now()}`;
+              console.log(`[Skills] 💾 STORING conversation ID: ${conversationId}`);
+
+              // Store context and update stats in background (don't block WebSocket)
+              c.executionCtx.waitUntil(
+                (async () => {
+                  try {
+                    await storeRetrievedSkills(c.env.MOLTBOT_BUCKET, conversationId, skillResult.skillIds);
+                    await updateConversationMessage(c.env.MOLTBOT_BUCKET, conversationId, userMessage);
+                    console.log(`[Skills] ✅ Context stored in R2 for ${conversationId}`);
+
+                    // Update retrieval stats
+                    await Promise.all(
+                      skillResult.skillIds.map(skillId => incrementSkillRetrieval(c.env.MOLTBOT_BUCKET, skillId))
+                    );
+                    console.log(`[Skills] ✅ Stats updated for ${skillResult.skillIds.length} skills`);
+                  } catch (err) {
+                    console.error('[Skills] ❌ Background storage failed:', err);
+                  }
+                })()
+              );
+
+              console.log(`[Skills] ✅ Injected ${skillResult.skillIds.length} skills into message`);
+              data = JSON.stringify(parsed);
+            }
+          }
+        } catch (e) {
+          // Not JSON or parse error, pass through unchanged
+          console.log('[Skills] Message injection error:', e);
+        }
+      }
+
+      // Capture the final data being sent (after injection)
+      if (isCaptureEnabled() && typeof data === 'string' && data !== event.data) {
+        captureMessage('client->container', `[AFTER INJECTION] ${data.slice(0, 500)}`);
+      }
+
       if (containerWs.readyState === WebSocket.OPEN) {
-        containerWs.send(event.data);
+        containerWs.send(data);
       } else if (debugLogs) {
         console.log('[WS] Container not open, readyState:', containerWs.readyState);
       }
     });
 
-    // Relay messages from container to client, with error transformation
+    // Relay messages from container to client, with error transformation and reflection trigger
     containerWs.addEventListener('message', (event) => {
       if (debugLogs) {
         console.log(
@@ -353,6 +449,11 @@ app.all('*', async (c) => {
         );
       }
       let data = event.data;
+
+      // Capture for diagnostics
+      if (isCaptureEnabled() && typeof data === 'string') {
+        captureMessage('container->client', data);
+      }
 
       // Try to intercept and transform error messages
       if (typeof data === 'string') {
@@ -370,6 +471,57 @@ app.all('*', async (c) => {
               console.log('[WS] Transformed error.message:', parsed.error.message);
             }
             data = JSON.stringify(parsed);
+          }
+
+          // Trigger reflection for assistant responses (if skills enabled)
+          if (c.env.SKILLS_ENABLED === 'true') {
+            // OpenClaw format: {"type":"event","event":"chat","payload":{"state":"final","message":{"role":"assistant","content":[...]}}}
+            if (
+              parsed.type === 'event' &&
+              parsed.event === 'chat' &&
+              parsed.payload?.state === 'final' &&
+              parsed.payload?.message?.role === 'assistant'
+            ) {
+              const content = parsed.payload.message.content;
+              const textContent = content?.find((c: any) => c.type === 'text')?.text || '';
+
+              if (textContent) {
+                console.log('[Skills] Detected final assistant response, length:', textContent.length);
+
+                // Trigger background reflection (find pending conversation and update it)
+                c.executionCtx.waitUntil(
+                  (async () => {
+                    try {
+                      // Find the most recent conversation waiting for a response
+                      const conversationId = await findPendingConversation(c.env.MOLTBOT_BUCKET);
+
+                      if (!conversationId) {
+                        console.log('[Skills] ⚠️ No pending conversation found for this response');
+                        return;
+                      }
+
+                      console.log(`[Skills] 🔍 Found pending conversation: ${conversationId}`);
+
+                      // Update conversation context with response
+                      await updateConversationResponse(c.env.MOLTBOT_BUCKET, conversationId, textContent);
+                      console.log('[Skills] ✅ Response stored');
+
+                      // Get retrieved skills for this conversation
+                      const retrievedSkills = await getRetrievedSkills(c.env.MOLTBOT_BUCKET, conversationId);
+
+                      console.log('[Skills] Skills for this conversation:', retrievedSkills.length);
+
+                      if (retrievedSkills.length > 0) {
+                        console.log('[Skills] ✅ Triggering reflection...');
+                        await triggerReflection(c.env, c.env.MOLTBOT_BUCKET, conversationId);
+                      }
+                    } catch (err) {
+                      console.error('[Skills] Reflection failed:', err);
+                    }
+                  })()
+                );
+              }
+            }
           }
         } catch (e) {
           if (debugLogs) {
