@@ -1,12 +1,7 @@
 name: Sync and Deploy Moltworker
 
 on:
-  workflow_dispatch:  # Manual trigger
-  push:
-    branches:
-      - main
-  schedule:
-    - cron: '0 0 * * 0'  # Weekly sync on Sundays
+  workflow_dispatch:  # Manual trigger only (paused)
 
 jobs:
   sync-and-deploy:
