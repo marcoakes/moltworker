@@ -44,6 +44,7 @@ export interface MoltbotEnv {
   WORKER_URL?: string; // Public URL of the worker (for CDP endpoint)
   // Skills system configuration
   SKILLS_ENABLED?: string; // Set to 'true' to enable self-improving skills system
+  DEMO_MODE?: string; // Set to 'true' to force deterministic skill creation for demo prompts
 }
 
 /**

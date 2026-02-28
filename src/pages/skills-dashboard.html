@@ -171,6 +171,38 @@
       padding: 40px;
       color: #999;
     }
+
+    .success {
+      background: #c6f6d5;
+      color: #22543d;
+      padding: 15px;
+      border-radius: 6px;
+      margin-bottom: 20px;
+    }
+
+    .status-badge {
+      display: inline-block;
+      padding: 6px 12px;
+      border-radius: 4px;
+      font-size: 0.85em;
+      font-weight: 600;
+      margin-bottom: 20px;
+    }
+
+    .status-online {
+      background: #c6f6d5;
+      color: #22543d;
+    }
+
+    .status-offline {
+      background: #fed7d7;
+      color: #c53030;
+    }
+
+    .status-warning {
+      background: #feebc8;
+      color: #7c2d12;
+    }
   </style>
 </head>
 <body>
@@ -179,6 +211,11 @@
     <p class="subtitle">Learned patterns and principles from experience</p>
 
     <div id="error-container"></div>
+    <div id="success-container"></div>
+
+    <div style="text-align: center; margin-bottom: 20px;">
+      <span class="status-badge status-offline" id="skills-status">● Skills System: Checking...</span>
+    </div>
 
     <div class="stats-grid">
       <div class="stat-card">
@@ -220,6 +257,7 @@
     <div class="section">
       <div class="actions">
         <button class="btn-primary" onclick="refreshData()">Refresh Data</button>
+        <button class="btn-primary" onclick="runTest()">Test Skills System</button>
         <button class="btn-danger" onclick="resetSkills()">Reset to Seed Skills</button>
       </div>
       <p class="timestamp" style="text-align: center; margin-top: 15px;">
@@ -229,10 +267,50 @@
   </div>
 
   <script>
+    let retryCount = 0;
+    const MAX_RETRIES = 3;
+
     function showError(message) {
       const container = document.getElementById('error-container');
       container.innerHTML = `<div class="error">${message}</div>`;
       setTimeout(() => { container.innerHTML = ''; }, 5000);
+    }
+
+    function showSuccess(message) {
+      const container = document.getElementById('success-container');
+      container.innerHTML = `<div class="success">${message}</div>`;
+      setTimeout(() => { container.innerHTML = ''; }, 3000);
+    }
+
+    function updateStatus(enabled, isError = false) {
+      const badge = document.getElementById('skills-status');
+      if (isError) {
+        badge.className = 'status-badge status-offline';
+        badge.textContent = '● Skills System: Error';
+      } else if (enabled === 'true') {
+        badge.className = 'status-badge status-online';
+        badge.textContent = '● Skills System: Active';
+      } else if (enabled === 'NOT SET') {
+        badge.className = 'status-badge status-warning';
+        badge.textContent = '⚠ Skills System: Not Configured (set SKILLS_ENABLED=true)';
+      } else {
+        badge.className = 'status-badge status-offline';
+        badge.textContent = '● Skills System: Disabled';
+      }
+    }
+
+    async function checkSkillsEnabled() {
+      try {
+        const res = await fetch('/api/skills/diagnostics/env');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        updateStatus(data.SKILLS_ENABLED);
+        return data.SKILLS_ENABLED === 'true';
+      } catch (error) {
+        console.error('Failed to check skills status:', error);
+        updateStatus(null, true);
+        return false;
+      }
     }
 
     function formatDate(isoString) {
@@ -248,9 +326,18 @@
     async function loadStats() {
       try {
         const res = await fetch('/api/skills/stats');
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        if (!res.ok) {
+          if (retryCount < MAX_RETRIES) {
+            retryCount++;
+            console.log(`Retrying... (${retryCount}/${MAX_RETRIES})`);
+            setTimeout(loadStats, 2000 * retryCount);
+            return;
+          }
+          throw new Error(`HTTP ${res.status}`);
+        }
 
         const data = await res.json();
+        retryCount = 0; // Reset retry count on success
 
         document.getElementById('total-count').textContent = data.total || 0;
         document.getElementById('general-count').textContent = data.byCategory?.general || 0;
@@ -275,8 +362,8 @@
               <tbody>
                 ${data.recentlyCreated.map(skill => `
                   <tr>
-                    <td><strong>${skill.name}</strong></td>
-                    <td><span class="category-badge ${getCategoryClass(skill.category)}">${skill.category}</span></td>
+                    <td><strong>${escapeHtml(skill.name)}</strong></td>
+                    <td><span class="category-badge ${getCategoryClass(skill.category)}">${escapeHtml(skill.category)}</span></td>
                     <td>${formatDate(skill.created_at)}</td>
                     <td>${skill.times_retrieved}</td>
                   </tr>
@@ -285,7 +372,7 @@
             </table>
           `;
         } else {
-          recentContainer.innerHTML = '<div class="empty-state">No skills yet</div>';
+          recentContainer.innerHTML = '<div class="empty-state">No skills created yet. Send messages in chat to trigger skill learning!</div>';
         }
 
         // Most retrieved skills
@@ -304,8 +391,8 @@
               <tbody>
                 ${data.mostRetrieved.map(skill => `
                   <tr>
-                    <td><strong>${skill.name}</strong></td>
-                    <td><span class="category-badge ${getCategoryClass(skill.category)}">${skill.category}</span></td>
+                    <td><strong>${escapeHtml(skill.name)}</strong></td>
+                    <td><span class="category-badge ${getCategoryClass(skill.category)}">${escapeHtml(skill.category)}</span></td>
                     <td><strong>${skill.times_retrieved}</strong></td>
                     <td>${formatDate(skill.created_at)}</td>
                   </tr>
@@ -314,16 +401,22 @@
             </table>
           `;
         } else {
-          topContainer.innerHTML = '<div class="empty-state">No skills yet</div>';
+          topContainer.innerHTML = '<div class="empty-state">No skills retrieved yet. Skills will appear here as they are used in conversations.</div>';
         }
       } catch (error) {
         console.error('Failed to load stats:', error);
-        showError('Failed to load statistics. ' + error.message);
+        showError(`Failed to load statistics: ${error.message}. <button onclick="loadStats()" style="margin-left: 10px; background: white; color: #c53030; border: 1px solid #c53030; padding: 5px 10px; border-radius: 4px; cursor: pointer;">Retry</button>`);
       }
     }
 
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
     async function resetSkills() {
-      if (!confirm('Are you sure you want to reset all skills to the seed state? This will delete all learned skills.')) {
+      if (!confirm('⚠️ Are you sure you want to reset all skills to the seed state?\n\nThis will DELETE all learned skills and cannot be undone.')) {
         return;
       }
 
@@ -331,23 +424,57 @@
         const res = await fetch('/api/skills/reset', { method: 'POST' });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
-        alert('Skills reset successfully!');
-        await refreshData();
+        showSuccess('✅ Skills reset successfully! Reloading...');
+        setTimeout(async () => {
+          await refreshData();
+        }, 1000);
       } catch (error) {
         console.error('Failed to reset skills:', error);
-        showError('Failed to reset skills. ' + error.message);
+        showError('Failed to reset skills: ' + error.message);
       }
     }
 
     async function refreshData() {
+      retryCount = 0; // Reset retry count
+      await checkSkillsEnabled();
       await loadStats();
     }
 
+    async function runTest() {
+      try {
+        showSuccess('Running skills system test...');
+        const res = await fetch('/api/skills/test', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: 'Compare NVDA and AMD revenue' })
+        });
+
+        const data = await res.json();
+
+        if (data.success) {
+          const details = `✅ Skills Enabled: ${data.skillsEnabled ? 'Yes' : 'No'}\n` +
+                         `📊 Skills Retrieved: ${data.test.skillsRetrieved}\n` +
+                         `📝 Message Augmented: ${data.test.messageAugmented ? 'Yes' : 'No'}\n\n` +
+                         `Skills: ${data.test.skillNames.join(', ')}`;
+          alert(details);
+          showSuccess(data.recommendation || 'Test completed successfully!');
+        } else {
+          throw new Error(data.message || 'Test failed');
+        }
+      } catch (error) {
+        console.error('Test failed:', error);
+        showError('Test failed: ' + error.message);
+      }
+    }
+
     // Initial load
-    loadStats();
+    (async () => {
+      await checkSkillsEnabled();
+      await loadStats();
+    })();
 
     // Auto-refresh every 30 seconds
-    setInterval(loadStats, 30000);
+    setInterval(refreshData, 30000);
   </script>
 </body>
 </html>

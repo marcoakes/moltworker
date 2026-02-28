@@ -21,8 +21,8 @@ function formatSkill(skill: Skill): string {
 /**
  * Format skill context for injection into message
  */
-export function formatSkillContext(general: Skill[], relevant: Skill[]): string {
-  if (general.length === 0 && relevant.length === 0) {
+export function formatSkillContext(general: Skill[], meta: Skill[], relevant: Skill[]): string {
+  if (general.length === 0 && meta.length === 0 && relevant.length === 0) {
     return '';
   }
 
@@ -32,6 +32,13 @@ export function formatSkillContext(general: Skill[], relevant: Skill[]): string 
   if (general.length > 0) {
     sections.push('### General Skills');
     sections.push(...general.map(formatSkill));
+    sections.push('');
+  }
+
+  // Meta skills section (always-on behavioral layer)
+  if (meta.length > 0) {
+    sections.push('### Meta Skills');
+    sections.push(...meta.map(formatSkill));
     sections.push('');
   }
 
@@ -52,9 +59,10 @@ export function formatSkillContext(general: Skill[], relevant: Skill[]): string 
 
     // Prioritize general skills, then as many relevant as fit
     const generalSection = general.length > 0 ? `### General Skills\n${general.map(formatSkill).join('\n')}\n` : '';
+    const metaSection = meta.length > 0 ? `\n### Meta Skills\n${meta.map(formatSkill).join('\n')}\n` : '';
 
-    let result = generalSection;
-    const availableChars = MAX_CHARS - generalSection.length - 100; // Reserve for header
+    let result = generalSection + metaSection;
+    const availableChars = MAX_CHARS - result.length - 100; // Reserve for header
 
     if (relevant.length > 0 && availableChars > 0) {
       result += '\n### Relevant Skills for This Task\n';

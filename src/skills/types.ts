@@ -93,6 +93,7 @@ export interface SkillStatsUpdate {
  */
 export interface SkillRetrievalResult {
   general: Skill[];
+  meta: Skill[];
   relevant: Skill[];
   skillIds: string[];
   formatted: string;

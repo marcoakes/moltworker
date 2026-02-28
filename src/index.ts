@@ -61,6 +61,30 @@ function transformErrorMessage(message: string, host: string): string {
   return message;
 }
 
+/**
+ * Extract assistant text content across different event payload shapes.
+ */
+function extractAssistantText(content: any): string {
+  if (!content) return '';
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((item) => {
+        if (!item) return '';
+        if (typeof item === 'string') return item;
+        if (item.type === 'text' && typeof item.text === 'string') return item.text;
+        if (typeof item.text === 'string') return item.text;
+        return '';
+      })
+      .filter(Boolean)
+      .join('\n');
+  }
+  if (typeof content === 'object' && typeof content.text === 'string') {
+    return content.text;
+  }
+  return '';
+}
+
 export { Sandbox };
 
 /**
@@ -372,11 +396,9 @@ app.all('*', async (c) => {
       }
 
       // Skills injection (only if SKILLS_ENABLED is true)
-      console.log('[Skills DEBUG] SKILLS_ENABLED:', c.env.SKILLS_ENABLED, 'data type:', typeof data);
       if (c.env.SKILLS_ENABLED === 'true' && typeof data === 'string') {
         try {
           const parsed = JSON.parse(data);
-          console.log('[Skills DEBUG] Parsed message type:', parsed.type, 'method:', parsed.method);
 
           // OpenClaw format: {"type":"req","method":"chat.send","params":{"message":"..."}}
           if (parsed.type === 'req' && parsed.method === 'chat.send' && parsed.params?.message) {
@@ -396,25 +418,22 @@ app.all('*', async (c) => {
 
               // Store retrieved skill IDs for reflection
               const conversationId = parsed.params.idempotencyKey || parsed.id || `conv-${Date.now()}`;
-              console.log(`[Skills] 💾 STORING conversation ID: ${conversationId}`);
+              console.log(`[Skills] Storing conversation context: ${conversationId}`);
 
-              // Store context and update stats in background (don't block WebSocket)
+              // Store context synchronously to avoid race with assistant final event.
+              try {
+                await storeRetrievedSkills(c.env.MOLTBOT_BUCKET, conversationId, skillResult.skillIds);
+                await updateConversationMessage(c.env.MOLTBOT_BUCKET, conversationId, userMessage);
+                console.log(`[Skills] ✅ Context stored in R2 for ${conversationId}`);
+              } catch (err) {
+                console.error('[Skills] ❌ Context storage failed:', err);
+              }
+
+              // Update retrieval stats in background.
               c.executionCtx.waitUntil(
-                (async () => {
-                  try {
-                    await storeRetrievedSkills(c.env.MOLTBOT_BUCKET, conversationId, skillResult.skillIds);
-                    await updateConversationMessage(c.env.MOLTBOT_BUCKET, conversationId, userMessage);
-                    console.log(`[Skills] ✅ Context stored in R2 for ${conversationId}`);
-
-                    // Update retrieval stats
-                    await Promise.all(
-                      skillResult.skillIds.map(skillId => incrementSkillRetrieval(c.env.MOLTBOT_BUCKET, skillId))
-                    );
-                    console.log(`[Skills] ✅ Stats updated for ${skillResult.skillIds.length} skills`);
-                  } catch (err) {
-                    console.error('[Skills] ❌ Background storage failed:', err);
-                  }
-                })()
+                Promise.all(
+                  skillResult.skillIds.map((skillId) => incrementSkillRetrieval(c.env.MOLTBOT_BUCKET, skillId)),
+                ).catch((err) => console.error('[Skills] ❌ Retrieval stats update failed:', err)),
               );
 
               console.log(`[Skills] ✅ Injected ${skillResult.skillIds.length} skills into message`);
@@ -440,7 +459,7 @@ app.all('*', async (c) => {
     });
 
     // Relay messages from container to client, with error transformation and reflection trigger
-    containerWs.addEventListener('message', (event) => {
+    containerWs.addEventListener('message', async (event) => {
       if (debugLogs) {
         console.log(
           '[WS] Container -> Client (raw):',
@@ -475,51 +494,48 @@ app.all('*', async (c) => {
 
           // Trigger reflection for assistant responses (if skills enabled)
           if (c.env.SKILLS_ENABLED === 'true') {
+            const state = parsed.payload?.state;
             // OpenClaw format: {"type":"event","event":"chat","payload":{"state":"final","message":{"role":"assistant","content":[...]}}}
             if (
               parsed.type === 'event' &&
               parsed.event === 'chat' &&
-              parsed.payload?.state === 'final' &&
+              (!state || state === 'final' || state === 'complete' || state === 'completed') &&
               parsed.payload?.message?.role === 'assistant'
             ) {
-              const content = parsed.payload.message.content;
-              const textContent = content?.find((c: any) => c.type === 'text')?.text || '';
+              const textContent = extractAssistantText(parsed.payload?.message?.content);
 
               if (textContent) {
                 console.log('[Skills] Detected final assistant response, length:', textContent.length);
 
-                // Trigger background reflection (find pending conversation and update it)
-                c.executionCtx.waitUntil(
-                  (async () => {
-                    try {
-                      // Find the most recent conversation waiting for a response
-                      const conversationId = await findPendingConversation(c.env.MOLTBOT_BUCKET);
+                try {
+                  // Find the most recent conversation waiting for a response
+                  const conversationId = await findPendingConversation(c.env.MOLTBOT_BUCKET);
 
-                      if (!conversationId) {
-                        console.log('[Skills] ⚠️ No pending conversation found for this response');
-                        return;
-                      }
+                  if (!conversationId) {
+                    console.log('[Skills] ⚠️ No pending conversation found for this response');
+                  } else {
+                    console.log(`[Skills] Found pending conversation: ${conversationId}`);
 
-                      console.log(`[Skills] 🔍 Found pending conversation: ${conversationId}`);
+                    // Update conversation context with response immediately for reliability.
+                    await updateConversationResponse(c.env.MOLTBOT_BUCKET, conversationId, textContent);
+                    console.log('[Skills] ✅ Response stored');
 
-                      // Update conversation context with response
-                      await updateConversationResponse(c.env.MOLTBOT_BUCKET, conversationId, textContent);
-                      console.log('[Skills] ✅ Response stored');
+                    // Get retrieved skills for this conversation
+                    const retrievedSkills = await getRetrievedSkills(c.env.MOLTBOT_BUCKET, conversationId);
+                    console.log('[Skills] Skills for this conversation:', retrievedSkills.length);
 
-                      // Get retrieved skills for this conversation
-                      const retrievedSkills = await getRetrievedSkills(c.env.MOLTBOT_BUCKET, conversationId);
-
-                      console.log('[Skills] Skills for this conversation:', retrievedSkills.length);
-
-                      if (retrievedSkills.length > 0) {
-                        console.log('[Skills] ✅ Triggering reflection...');
-                        await triggerReflection(c.env, c.env.MOLTBOT_BUCKET, conversationId);
-                      }
-                    } catch (err) {
-                      console.error('[Skills] Reflection failed:', err);
+                    if (retrievedSkills.length > 0) {
+                      console.log('[Skills] ✅ Triggering reflection...');
+                      c.executionCtx.waitUntil(
+                        triggerReflection(c.env, c.env.MOLTBOT_BUCKET, conversationId).catch((err) => {
+                          console.error('[Skills] Reflection failed:', err);
+                        }),
+                      );
                     }
-                  })()
-                );
+                  }
+                } catch (err) {
+                  console.error('[Skills] Reflection pipeline failed:', err);
+                }
               }
             }
           }

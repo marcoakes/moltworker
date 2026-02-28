@@ -25,6 +25,9 @@ ANTHROPIC_API_KEY=sk-ant-...
 # Enable debug routes at /debug/* (optional)
 # DEBUG_ROUTES=true
 
+# Skills demo mode (optional): force deterministic skill creation for comparison prompts
+# DEMO_MODE=true
+
 # Optional - set a fixed token instead of auto-generated
 MOLTBOT_GATEWAY_TOKEN=dev-token-change-in-prod
 

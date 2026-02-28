@@ -79,6 +79,8 @@ export async function retrieveSkillsForMessage(
 ): Promise<SkillRetrievalResult> {
   // Always include general skills
   const generalSkills = await listSkills(bucket, 'general');
+  // Always include meta skills (system behavior layer)
+  const metaSkills = await listSkills(bucket, 'meta');
 
   // Detect relevant categories
   const detectedCategories = detectCategory(message);
@@ -102,7 +104,7 @@ export async function retrieveSkillsForMessage(
   const relevantSkills = scoredSkills.slice(0, 5).map((s) => s.skill);
 
   // Increment retrieval counts (fire and forget)
-  const allRetrieved = [...generalSkills, ...relevantSkills];
+  const allRetrieved = [...generalSkills, ...metaSkills, ...relevantSkills];
   const skillIds = allRetrieved.map((s) => s.id);
 
   // Update retrieval counts in background
@@ -111,10 +113,11 @@ export async function retrieveSkillsForMessage(
   });
 
   // Format the skill context
-  const formatted = formatSkillContext(generalSkills, relevantSkills);
+  const formatted = formatSkillContext(generalSkills, metaSkills, relevantSkills);
 
   return {
     general: generalSkills,
+    meta: metaSkills,
     relevant: relevantSkills,
     skillIds,
     formatted,

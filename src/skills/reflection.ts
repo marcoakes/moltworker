@@ -29,7 +29,7 @@ export async function storeRetrievedSkills(bucket: R2Bucket, conversationId: str
   const key = getConversationKey(conversationId);
   await bucket.put(key, JSON.stringify(context));
 
-  console.log(`[Skills] 💾 STORED context in R2: ${conversationId}, skills: ${skillIds.length}`);
+  console.log(`[Skills] Stored context in R2: ${conversationId}, skills: ${skillIds.length}`);
 }
 
 /**
@@ -174,8 +174,6 @@ async function callReflectionLLM(env: MoltbotEnv, prompt: string): Promise<Refle
   const data = (await response.json()) as any;
   const content = data.content[0].text as string;
 
-  console.log('[Skills] Reflection LLM raw response:', content.slice(0, 500));
-
   // Parse JSON from response
   // Try to extract JSON if wrapped in markdown code blocks
   const jsonMatch = content.match(/```json\s*([\s\S]*?)\s*```/) || content.match(/\{[\s\S]*\}/);
@@ -185,9 +183,7 @@ async function callReflectionLLM(env: MoltbotEnv, prompt: string): Promise<Refle
   }
 
   const jsonText = jsonMatch[1] || jsonMatch[0];
-  const result = JSON.parse(jsonText) as ReflectionResult;
-  console.log('[Skills] Parsed reflection result:', JSON.stringify(result, null, 2).slice(0, 500));
-  return result;
+  return JSON.parse(jsonText) as ReflectionResult;
 }
 
 /**
@@ -285,6 +281,34 @@ Only propose a new skill if it is: transferable (applies beyond this specific ta
 }
 
 /**
+ * Demo-mode deterministic fallback skill proposal.
+ * Used only when DEMO_MODE=true and model returned no new skill.
+ */
+function maybeBuildDemoFallbackSkill(context: ConversationContext): ReflectionResult['new_skill'] {
+  const message = context.userMessage || '';
+  const normalized = message.toLowerCase();
+  const isComparisonPrompt =
+    normalized.includes('compare') ||
+    normalized.includes(' vs ') ||
+    normalized.includes(' versus ') ||
+    normalized.includes('difference between');
+
+  if (!isComparisonPrompt) {
+    return null;
+  }
+
+  const timeTag = new Date().toISOString().slice(11, 19).replace(/:/g, '');
+  return {
+    name: `Demo Comparison Normalization ${timeTag}`,
+    category: 'earnings',
+    principle:
+      'When comparing companies, align fiscal calendars, metric definitions, and reporting windows before drawing conclusions.',
+    when_to_apply:
+      'When a request compares two companies or asks for cross-company trend analysis.',
+  };
+}
+
+/**
  * Trigger reflection for a conversation
  */
 export async function triggerReflection(
@@ -292,16 +316,16 @@ export async function triggerReflection(
   bucket: R2Bucket,
   conversationId: string,
 ): Promise<void> {
-  console.log(`[Skills] 🔍 Triggering reflection for conversation ${conversationId}`);
+  console.log(`[Skills] Triggering reflection for conversation ${conversationId}`);
 
   // Get conversation context from R2
   const context = await getConversationContext(bucket, conversationId);
   if (!context) {
-    console.warn(`[Skills] ❌ No context found in R2 for conversation ${conversationId}`);
+    console.warn(`[Skills] No context found in R2 for conversation ${conversationId}`);
     return;
   }
 
-  console.log(`[Skills] ✅ Found context with ${context.retrievedSkillIds.length} skills`);
+  console.log(`[Skills] Found context with ${context.retrievedSkillIds.length} skills`);
 
   // Get skill index
   const index = await getIndex(bucket);
@@ -323,6 +347,16 @@ export async function triggerReflection(
   try {
     // Call LLM
     const result = await callReflectionLLM(env, prompt);
+
+    // Deterministic demo behavior: force skill creation for comparison prompts.
+    if (env.DEMO_MODE === 'true' && !result.new_skill) {
+      const fallbackSkill = maybeBuildDemoFallbackSkill(context);
+      if (fallbackSkill) {
+        result.new_skill = fallbackSkill;
+        result.reasoning = `${result.reasoning || ''} | DEMO_MODE fallback: forced skill creation for comparison prompt.`.trim();
+        console.log('[Skills] DEMO_MODE fallback applied: forcing new skill creation');
+      }
+    }
 
     console.log(`[Skills] Reflection result:`, result);
 
